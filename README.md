@@ -42,6 +42,16 @@ schedule and used by other sites with a similar shape:
 If your site is React and you are happy with Privy's own login, use Privy's
 React SDK instead. It does more with less code.
 
+## Install
+
+The package is distributed as a tarball attached to each
+[GitHub Release](https://github.com/truflation/privy-embedded-wallet/releases),
+not through the npm registry:
+
+```sh
+npm install https://github.com/truflation/privy-embedded-wallet/releases/download/v0.1.0/truflation-privy-embedded-wallet-0.1.0.tgz
+```
+
 ## Entry points
 
 - `@truflation/privy-embedded-wallet/server`: Node. Wallet service, request
@@ -131,7 +141,7 @@ The code has not been independently audited. Key export has been run end to
 end against a Privy development app, but only for one wallet configuration, so
 test it against your own app. Review the package against your own threat model
 before holding real funds.
-The server entry requires Node 22 or later. The client entry requires
+The server entry requires Node 22 or later. The wagmi entry requires
 `@wagmi/core` 3.3.0 or later (below 4).
 
 ## License
