@@ -49,7 +49,7 @@ The package is distributed as a tarball attached to each
 not through the npm registry:
 
 ```sh
-npm install https://github.com/truflation/privy-embedded-wallet/releases/download/v0.1.0/truflation-privy-embedded-wallet-0.1.0.tgz
+npm install https://github.com/truflation/privy-embedded-wallet/releases/download/v0.2.0/truflation-privy-embedded-wallet-0.2.0.tgz
 ```
 
 ## Entry points
@@ -116,12 +116,25 @@ export const config = createConfig({
   ],
 });
 // connect(config, { connector }), signMessage and sendTransaction now work,
-// where connector comes from getEmbeddedWalletConnector(config).
+// where connector comes from getEmbeddedWalletConnector(config). On chains
+// with sponsor: true, sendCalls sends an atomic batch (EIP-5792).
 ```
 
 You also need a Privy app with custom auth pointed at your JWT keys. That setup,
 the wallet store, transaction rules, Privy policies, sign-out wiring and a
 production checklist are in the guide.
+
+## Batched calls
+
+On chains configured with `sponsor: true`, the wallet supports EIP-5792:
+wagmi's `getCapabilities` reports `atomic: supported` there, and `sendCalls`
+sends up to 10 calls (for example an ERC-20 `approve` and the `deposit` that
+spends it) as one atomic, sponsored transaction, which saves one sponsorship
+overhead per extra call. Every call passes the chain's `allow` list and your
+`authorizeTransaction` hook, which receives `batch: { index, size }`; if any
+call is refused, nothing is sent. On unsponsored chains batches are refused,
+so check the capability and fall back to separate sends. See
+[Batched calls](docs/integration-guide.md#batched-calls).
 
 ## Documentation
 

@@ -40,6 +40,15 @@ export interface PrivyGateway {
     input: SendTransactionInput,
     jwt: string,
   ): Promise<SentTransaction>;
+  /**
+   * `wallet_sendCalls` (EIP-5792): the calls in order, as one atomic,
+   * sponsored transaction.
+   */
+  sendCalls(
+    walletId: string,
+    input: SendCallsInput,
+    jwt: string,
+  ): Promise<SentCalls>;
   getTransaction(transactionId: string): Promise<PrivyTransactionRef>;
   /**
    * Asks Privy for the wallet's private key, HPKE-encrypted to
@@ -100,6 +109,23 @@ export interface SendTransactionInput {
   referenceId: string;
 }
 
+export interface SendCallsInput {
+  chainId: number;
+  calls: readonly { to: string; data?: Hex; value?: Hex }[];
+  /**
+   * The same key a single send with this user and `requestId` would use, so
+   * one intent can never produce both a single send and a batch. Privy's
+   * `wallet_sendCalls` takes no `reference_id`, so this is the only
+   * deduplication for a batch.
+   */
+  idempotencyKey: string;
+}
+
+export interface SentCalls {
+  /** Privy's transaction id for the batch. */
+  transactionId: string | undefined;
+}
+
 export interface SentTransaction {
   /** May be empty for sponsored transactions that are not yet broadcast. */
   hash: string;
@@ -123,4 +149,6 @@ export interface PrivyTransactionRef {
   /** Typed as string because Privy may add statuses. */
   status: PrivyTransactionStatus | (string & {});
   hash: string | null;
+  /** CAIP-2 chain id, for example `eip155:1`. */
+  caip2?: string;
 }

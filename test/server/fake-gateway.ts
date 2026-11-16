@@ -7,7 +7,9 @@ import type {
   PrivyGateway,
   PrivyTransactionRef,
   PrivyWalletRef,
+  SendCallsInput,
   SendTransactionInput,
+  SentCalls,
   SentTransaction,
 } from '../../src/server/privy/gateway';
 import {
@@ -41,6 +43,7 @@ type FailureKey =
   | 'authorize'
   | 'signMessage'
   | 'sendTransaction'
+  | 'sendCalls'
   | 'getTransaction'
   | 'exportWallet';
 
@@ -69,6 +72,9 @@ function subjectOf(jwt: string): string | undefined {
  * - A `reference_id` is unique per app: reusing one with a new idempotency
  *   key is rejected. This is Privy's documented contract, modeled here, not
  *   observed.
+ * - `wallet_sendCalls` shares the idempotency cache with single sends, and
+ *   creates one transaction for the whole batch. Its answer carries only a
+ *   transaction id. Assumed from the SDK types, not observed.
  */
 export function createFakeGateway() {
   let nextId = 1;
@@ -77,7 +83,7 @@ export function createFakeGateway() {
   const wallets: FakeWallet[] = [];
   const transactions = new Map<string, PrivyTransactionRef>();
   const failures = new Map<FailureKey, UpstreamError>();
-  const idempotent = new Map<string, SentTransaction>();
+  const idempotent = new Map<string, SentTransaction | SentCalls>();
   const referenceIds = new Set<string>();
   const calls = {
     findUser: 0,
@@ -88,10 +94,12 @@ export function createFakeGateway() {
     authorize: [] as string[],
     signMessage: [] as { walletId: string; message: Uint8Array }[],
     sendTransaction: [] as { walletId: string; input: SendTransactionInput }[],
+    sendCalls: [] as { walletId: string; input: SendCallsInput }[],
     getTransaction: [] as string[],
     exportWallet: [] as { walletId: string; recipientPublicKey: string }[],
   };
   let sendResult: ((walletId: string) => SentTransaction) | null = null;
+  let sendCallsResult: ((walletId: string) => SentCalls) | null = null;
   /** When false, `updateWalletPolicies` succeeds but attaches nothing. */
   let honourPolicyUpdates = true;
 
@@ -200,7 +208,7 @@ export function createFakeGateway() {
       fail('sendTransaction');
       ownedWallet(walletId, jwt);
       const cached = idempotent.get(input.idempotencyKey);
-      if (cached) return { ...cached };
+      if (cached) return { hash: '', ...cached };
       if (referenceIds.has(input.referenceId)) {
         throw upstream('conflict', 409, 'reference_id already used');
       }
@@ -213,6 +221,27 @@ export function createFakeGateway() {
       }
       idempotent.set(input.idempotencyKey, result);
       referenceIds.add(input.referenceId);
+      return { ...result };
+    },
+    async sendCalls(walletId, input, jwt) {
+      calls.sendCalls.push({ walletId, input });
+      fail('sendCalls');
+      ownedWallet(walletId, jwt);
+      const cached = idempotent.get(input.idempotencyKey);
+      if (cached) return { transactionId: cached.transactionId };
+      let result: SentCalls;
+      if (sendCallsResult) {
+        result = sendCallsResult(walletId);
+      } else {
+        const tx = addTransaction({
+          walletId,
+          status: 'pending',
+          hash: null,
+          caip2: `eip155:${input.chainId}`,
+        });
+        result = { transactionId: tx.id };
+      }
+      idempotent.set(input.idempotencyKey, result);
       return { ...result };
     },
     async getTransaction(transactionId) {
@@ -251,6 +280,9 @@ export function createFakeGateway() {
     },
     setSendResult(fn: ((walletId: string) => SentTransaction) | null) {
       sendResult = fn;
+    },
+    setSendCallsResult(fn: ((walletId: string) => SentCalls) | null) {
+      sendCallsResult = fn;
     },
     /** Simulates Privy's 24-hour idempotency window passing. */
     expireIdempotency() {

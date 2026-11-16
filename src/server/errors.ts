@@ -34,6 +34,8 @@ export const DEFAULT_ERROR_MESSAGE: Record<ErrorCode, string> = {
   [ERROR_CODE.WALLET_NOT_FOUND]: 'No wallet exists for this account yet.',
   [ERROR_CODE.INVALID_REQUEST]: 'The request is not valid.',
   [ERROR_CODE.CHAIN_NOT_SUPPORTED]: 'This chain is not supported.',
+  [ERROR_CODE.BATCH_NOT_SUPPORTED]:
+    'Batched calls are only supported on sponsored chains.',
   [ERROR_CODE.POLICY_DENIED]: 'The wallet policy does not allow this request.',
   [ERROR_CODE.ACCOUNT_MISMATCH]:
     'The signed-in account does not own this wallet address.',

@@ -58,6 +58,7 @@ const ROUTES = {
   WALLET: '/wallet', // GET: wallet or 404. POST: create if missing.
   SIGN_MESSAGE: '/sign-message', // POST
   TRANSACTIONS: '/transactions', // POST submit. GET /transactions/:id status.
+  CALLS: '/calls', // POST an atomic batch. Status via GET /transactions/:id.
   WALLET_EXPORT: '/wallet/export', // POST. HPKE-encrypted private key.
 } as const;
 ```
@@ -71,6 +72,7 @@ const ERROR_CODE = {
   WALLET_NOT_FOUND: 'WALLET_NOT_FOUND',
   INVALID_REQUEST: 'INVALID_REQUEST',
   CHAIN_NOT_SUPPORTED: 'CHAIN_NOT_SUPPORTED',
+  BATCH_NOT_SUPPORTED: 'BATCH_NOT_SUPPORTED', // batch on an unsponsored chain
   POLICY_DENIED: 'POLICY_DENIED',
   ACCOUNT_MISMATCH: 'ACCOUNT_MISMATCH',
   INSUFFICIENT_FUNDS: 'INSUFFICIENT_FUNDS',
@@ -93,6 +95,7 @@ interface ErrorResponse {
 interface WalletResponse {
   address: Address;
   created?: boolean; // true only on the POST that created the wallet
+  batchChainIds?: number[]; // chains accepting POST /calls; absent before 0.2.0
 }
 
 type SignableMessage = string | { raw: Hex };
@@ -111,6 +114,19 @@ interface TransactionRequest {
   to: Address;
   data?: Hex;
   value?: Hex; // wei, canonical hex quantity (0x0, 0x1a, no leading zeros)
+}
+
+const MAX_BATCH_CALLS = 10;
+interface BatchCall {
+  to: Address;
+  data?: Hex;
+  value?: Hex;
+}
+interface SendCallsRequest {
+  requestId: string; // as on TransactionRequest
+  from: Address;
+  chainId: number;
+  calls: BatchCall[]; // 1 to MAX_BATCH_CALLS, executed in order, atomically
 }
 
 interface ExportWalletRequest {
@@ -134,6 +150,7 @@ interface TransactionResponse {
   id: string; // opaque, for polling
   status: TransactionStatus;
   hash?: Hex; // may be absent while a sponsored send is bundled
+  chainId?: number; // set by GET /transactions/:id when Privy reports it
 }
 ```
 
@@ -144,7 +161,9 @@ Request validation (applies to the handler and to direct service calls):
   checksum.
 - `chainId` is a positive integer. `requestId` is a UUID in 8-4-4-4-12 form.
 - `value` is a canonical hex quantity up to the uint256 maximum.
-- `data` is even-length hex up to 64 KiB. A message is at most 16 KiB (UTF-8
+- `data` is even-length hex up to 64 KiB. A batch has 1 to `MAX_BATCH_CALLS`
+  calls, each validated like a transaction's `to`, `data` and `value`, with
+  at most 64 KiB of `data` across all calls. A message is at most 16 KiB (UTF-8
   or raw), must not be empty, and a string must be valid Unicode.
 - `recipientPublicKey` is standard padded base64 that decodes to exactly 91
   bytes: the DER SubjectPublicKeyInfo header for an uncompressed P-256 key
@@ -225,11 +244,16 @@ interface EmbeddedWalletService {
     session: Session,
     request: TransactionRequest,
   ): Promise<TransactionResponse>;
+  sendCalls(
+    session: Session,
+    request: SendCallsRequest,
+  ): Promise<TransactionResponse>;
   getTransaction(session: Session, id: string): Promise<TransactionResponse>;
   exportWallet(
     session: Session,
     request: ExportWalletRequest,
   ): Promise<ExportWalletResponse>;
+  readonly batchChainIds: readonly number[]; // sponsored chains, ascending
 }
 interface WalletResult {
   address: Address;
@@ -249,7 +273,8 @@ interface SignMessageOptions {
 | `ensureWallet(session)`               | `{ address, created }`             | `UNAUTHENTICATED`, `PROVIDER_ERROR`. Finds or creates the Privy user and wallet. See below.                                        |
 | `signMessage(session, req, options?)` | `{ signature }`                    | `UNAUTHENTICATED`, `INVALID_REQUEST`, `WALLET_NOT_FOUND`, `ACCOUNT_MISMATCH`, `REAUTH_REQUIRED`, `POLICY_DENIED`, `PROVIDER_ERROR` |
 | `sendTransaction(session, req)`       | `{ id, status: 'pending', hash? }` | the above, plus `CHAIN_NOT_SUPPORTED`, `INSUFFICIENT_FUNDS`                                                                        |
-| `getTransaction(session, id)`         | `{ id, status, hash? }`            | `UNAUTHENTICATED`, `INVALID_REQUEST` (bad id), `TRANSACTION_NOT_FOUND`, `PROVIDER_ERROR`                                           |
+| `sendCalls(session, req)`             | `{ id, status: 'pending' }`        | as `sendTransaction`, plus `BATCH_NOT_SUPPORTED`                                                                                   |
+| `getTransaction(session, id)`         | `{ id, status, hash?, chainId? }`  | `UNAUTHENTICATED`, `INVALID_REQUEST` (bad id), `TRANSACTION_NOT_FOUND`, `PROVIDER_ERROR`                                           |
 | `exportWallet(session, req)`          | `{ ciphertext, encapsulatedKey }`  | `UNAUTHENTICATED`, `INVALID_REQUEST`, `WALLET_NOT_FOUND`, `ACCOUNT_MISMATCH`, `POLICY_DENIED`, `REAUTH_REQUIRED`, `PROVIDER_ERROR` |
 
 Details:
@@ -274,6 +299,17 @@ Details:
   exchange, policy check and the Privy send. It is idempotent per
   `requestId`. The returned status is always `pending`; the `hash` is present
   when Privy already had one. Use `getTransaction` for the outcome.
+- `sendCalls` runs, in order: validation (`INVALID_REQUEST`, including an
+  empty batch or more than `MAX_BATCH_CALLS` calls), chain lookup
+  (`CHAIN_NOT_SUPPORTED`), the sponsored-chain check (`BATCH_NOT_SUPPORTED`),
+  wallet lookup, `from` check, the chain `allow` list for every call, the
+  `authorizeTransaction` hook once per call in order with
+  `batch: { index, size }` (any refusal is `POLICY_DENIED` for the whole
+  batch, and nothing reaches Privy), then the JWT exchange, policy check and
+  Privy's `wallet_sendCalls` with `sponsor: true`. It uses the same Privy
+  idempotency key as `sendTransaction` for the same user and `requestId`;
+  there is no `reference_id`. The result is always `pending` and carries the
+  Privy transaction id, which `getTransaction` reads.
 - `getTransaction` loads the transaction by id from Privy and returns it only if
   it was sent by the session user's wallet. Another user's transaction, an
   unknown id, and a user with no wallet all give `TRANSACTION_NOT_FOUND`. It
@@ -311,9 +347,17 @@ interface ChainConfig {
   allow?: { to: readonly Address[]; maxValue?: bigint }; // maxValue default 0n
 }
 
+interface TransactionAuthorizationRequest extends TransactionRequest {
+  batch?: Readonly<BatchPosition>; // only for a call inside a batch
+}
+interface BatchPosition {
+  index: number; // zero-based position of the call
+  size: number; // number of calls in the batch
+}
+
 type AuthorizeTransaction = (
   session: Session,
-  tx: Readonly<TransactionRequest>,
+  tx: Readonly<TransactionAuthorizationRequest>,
 ) => boolean | Promise<boolean>;
 ```
 
@@ -322,8 +366,11 @@ that chain in the Privy dashboard. `allow.to` is compared case-insensitively.
 `allow` does not inspect calldata. A hook allows a transaction only by
 returning exactly `true`; any other value, a throw, or a rejection gives
 `POLICY_DENIED`. The hook runs after the `allow` list, and `tx.from` and
-`tx.to` are checksummed. See
-[Transaction rules](integration-guide.md#transaction-rules).
+`tx.to` are checksummed. For a batch the hook runs once per call, in order,
+with the batch's `requestId` and `batch` set; a single send has no `batch`.
+Batches are accepted only on chains with `sponsor: true`. See
+[Transaction rules](integration-guide.md#transaction-rules) and
+[Batched calls](integration-guide.md#batched-calls).
 
 ```ts
 const chains = {
@@ -443,14 +490,15 @@ Order of checks for a request:
 
 Routes (relative to `basePath`; paths match exactly, no trailing slash):
 
-| Request                 | Body                  | 200 response                             |
-| ----------------------- | --------------------- | ---------------------------------------- |
-| `GET /wallet`           | none                  | `{ address }`, or 404 `WALLET_NOT_FOUND` |
-| `POST /wallet`          | empty or `{}`         | `{ address, created }`                   |
-| `POST /sign-message`    | `SignMessageRequest`  | `{ signature }`                          |
-| `POST /transactions`    | `TransactionRequest`  | `TransactionResponse`                    |
-| `GET /transactions/:id` | none                  | `TransactionResponse`                    |
-| `POST /wallet/export`   | `ExportWalletRequest` | `ExportWalletResponse`                   |
+| Request                 | Body                  | 200 response                                            |
+| ----------------------- | --------------------- | ------------------------------------------------------- |
+| `GET /wallet`           | none                  | `{ address, batchChainIds }`, or 404 `WALLET_NOT_FOUND` |
+| `POST /wallet`          | empty or `{}`         | `{ address, created, batchChainIds }`                   |
+| `POST /sign-message`    | `SignMessageRequest`  | `{ signature }`                                         |
+| `POST /transactions`    | `TransactionRequest`  | `TransactionResponse`                                   |
+| `POST /calls`           | `SendCallsRequest`    | `TransactionResponse`                                   |
+| `GET /transactions/:id` | none                  | `TransactionResponse`                                   |
+| `POST /wallet/export`   | `ExportWalletRequest` | `ExportWalletResponse`                                  |
 
 Every response is JSON with `Cache-Control: no-store` and
 `X-Content-Type-Options: nosniff`. Errors use `ErrorResponse`. An error that
@@ -564,6 +612,7 @@ interface EmbeddedWalletClient {
   ensureWallet(): Promise<WalletResponse>;
   signMessage(request: SignMessageRequest): Promise<SignMessageResponse>;
   sendTransaction(request: TransactionRequest): Promise<TransactionResponse>;
+  sendCalls(request: SendCallsRequest): Promise<TransactionResponse>; // POST /calls
   getTransaction(id: string): Promise<TransactionResponse>;
   exportWallet(request: ExportWalletRequest): Promise<ExportWalletResponse>; // raw; use exportPrivateKey
 }
@@ -580,9 +629,11 @@ carries the server's `code`; a body that is not a valid error body becomes
 `PROVIDER_ERROR` with the HTTP status. A 2xx body of the wrong shape is
 `PROVIDER_ERROR` too. `getTransaction` URL-encodes the id.
 
-`sendTransaction` takes a full `TransactionRequest`, so you generate the
+`sendTransaction` and `sendCalls` take a full request, so you generate the
 `requestId` (`crypto.randomUUID()`), and you must reuse it if you retry the
-same intent.
+same intent. `getWallet` and `ensureWallet` include `batchChainIds` when the
+server sends it; a malformed list is dropped to its valid entries rather than
+failing the call.
 
 ```ts
 const client = createEmbeddedWalletClient({
@@ -643,6 +694,12 @@ interface CreateEmbeddedProviderOptions {
   pollingInterval?: number; // default 1000 ms, backs off by 1.5x to 5000 ms
   transactionTimeout?: number; // default 120000 ms
   onChainChanged?: (chainId: number) => void | Promise<void>;
+  // Reads eth_getTransactionReceipt for wallet_getCallsStatus receipts.
+  // Resolve null when the node has no receipt yet. The connector supplies it.
+  getTransactionReceipt?: (request: {
+    chainId: number;
+    hash: Hex;
+  }) => Promise<unknown>;
 }
 
 interface EmbeddedProvider {
@@ -688,6 +745,11 @@ const RPC_ERROR_CODE = {
   TRANSACTION_FAILED: -32000,
   RESOURCE_NOT_FOUND: -32001,
   TRANSACTION_REJECTED: -32003,
+  UNSUPPORTED_NON_OPTIONAL_CAPABILITY: 5700, // EIP-5792
+  UNSUPPORTED_CHAIN_ID: 5710, // EIP-5792: no batching on that chain
+  UNKNOWN_BUNDLE_ID: 5730, // EIP-5792
+  BUNDLE_TOO_LARGE: 5740, // EIP-5792: more than MAX_BATCH_CALLS calls
+  ATOMICITY_NOT_SUPPORTED: 5760, // EIP-5792: atomicRequired on such a chain
 } as const;
 ```
 
@@ -756,7 +818,7 @@ Connector behaviour:
 | `disconnect()`         | Drops connector state only. Never ends the site session.                                                                                                                                                             |
 | `getAccounts()`        | `[]` when signed out, else the wallet address (checksummed).                                                                                                                                                         |
 | `getChainId()`         | The current chain id.                                                                                                                                                                                                |
-| `getProvider()`        | The [`EmbeddedProvider`](#createembeddedprovider).                                                                                                                                                                   |
+| `getProvider()`        | The [`EmbeddedProvider`](#createembeddedprovider). Its `wallet_getCallsStatus` reads receipts through the wagmi config's transport for the batch's chain.                                                            |
 | `isAuthorized()`       | True when `hasSession()` is true and a wallet exists. False on any error.                                                                                                                                            |
 | `switchChain()`        | Switches the provider chain, persists it, and emits wagmi's `change` event.                                                                                                                                          |
 | `notifySessionEnded()` | Extra property. Drops cached state and emits wagmi's `disconnect`. Call it when the site session ends.                                                                                                               |

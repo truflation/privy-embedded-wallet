@@ -2,10 +2,14 @@ import {
   connect,
   createConfig,
   createStorage,
+  custom,
   disconnect,
   getAccount,
+  getCallsStatus,
+  getCapabilities,
   http,
   reconnect,
+  sendCalls,
   switchChain,
 } from '@wagmi/core';
 import { mainnet, sepolia } from '@wagmi/core/chains';
@@ -463,5 +467,93 @@ describe('getEmbeddedWalletConnector', () => {
         connectors: [{ id: 'embedded-wallet', type: 'injected' }] as never,
       }),
     ).toBeUndefined();
+  });
+});
+
+describe('EIP-5792 through wagmi', () => {
+  const HASH = `0x${'ab'.repeat(32)}` as const;
+  const RECEIPT = {
+    blockHash: `0x${'cd'.repeat(32)}`,
+    blockNumber: '0x10',
+    gasUsed: '0x5208',
+    logs: [],
+    status: '0x1',
+    transactionHash: HASH,
+  };
+
+  function buildBatching() {
+    const client = createFakeClient({
+      getWallet: vi.fn(async () => ({
+        address: WALLET_ADDRESS,
+        batchChainIds: [sepolia.id],
+      })),
+      getTransaction: vi.fn(async () => ({
+        id: 'batch-1',
+        status: 'confirmed' as const,
+        hash: HASH,
+        chainId: sepolia.id,
+      })),
+    });
+    const nodeRequest = vi.fn(async ({ method }: { method: string }) =>
+      method === 'eth_getTransactionReceipt' ? RECEIPT : null,
+    );
+    const config = createConfig({
+      chains: [mainnet, sepolia],
+      transports: {
+        [mainnet.id]: http(),
+        [sepolia.id]: custom({ request: nodeRequest }),
+      },
+      storage: createStorage({ storage: memoryStorage() }),
+      connectors: [embeddedWallet({ client, hasSession: () => true })],
+    });
+    return { config, client, nodeRequest, connector: config.connectors[0]! };
+  }
+
+  it('reports atomic capabilities, sends a batch and reads its receipt', async () => {
+    const { config, client, nodeRequest, connector } = buildBatching();
+    await connect(config, { connector, chainId: sepolia.id });
+
+    expect(await getCapabilities(config)).toEqual({
+      [mainnet.id]: { atomic: { status: 'unsupported' } },
+      [sepolia.id]: { atomic: { status: 'supported' } },
+    });
+
+    const { id } = await sendCalls(config, {
+      calls: [
+        { to: WALLET_ADDRESS, data: '0x' },
+        { to: WALLET_ADDRESS, value: 0n },
+      ],
+    });
+    expect(id).toBe('batch-1');
+    expect(client.sendCalls).toHaveBeenCalledWith(
+      expect.objectContaining({
+        from: WALLET_ADDRESS,
+        chainId: sepolia.id,
+        calls: [{ to: WALLET_ADDRESS, data: '0x' }, { to: WALLET_ADDRESS }],
+      }),
+    );
+
+    const status = await getCallsStatus(config, { id });
+    expect(status).toMatchObject({ status: 'success', statusCode: 200 });
+    expect(status.receipts![0]).toMatchObject({
+      transactionHash: HASH,
+      blockNumber: 16n,
+    });
+    expect(nodeRequest.mock.calls[0]![0]).toEqual({
+      method: 'eth_getTransactionReceipt',
+      params: [HASH],
+    });
+  });
+
+  it('refuses a batch on a chain the server does not batch on', async () => {
+    const { config, client, connector } = buildBatching();
+    await connect(config, { connector, chainId: mainnet.id });
+    const error = await sendCalls(config, {
+      calls: [{ to: WALLET_ADDRESS }],
+    }).catch((e: unknown) => e);
+    expect((error as { name?: string }).name).toBe('TransactionExecutionError');
+    expect(((error as Error).cause as { code?: number }).code).toBe(5710);
+    expect(client.sendCalls).not.toHaveBeenCalled();
+    expect(client.sendTransaction).not.toHaveBeenCalled();
   });
 });

@@ -208,6 +208,7 @@ describe('sdk gateway', () => {
       walletId: 'w1',
       status: 'broadcasted',
       hash: null,
+      caip2: 'eip155:11155111',
     });
     expect(recorded[0]).toMatchObject({
       method: 'GET',
@@ -391,6 +392,64 @@ describe('sdk gateway wallet requests', () => {
       ['idem-3', 'idem-3'],
     );
   }, 10_000);
+
+  it('sends a batch with wallet_sendCalls, always sponsored, with the idempotency header and no reference_id', async () => {
+    await stubJwtExchange();
+    respond = () =>
+      rpcResponse('wallet_sendCalls', {
+        caip2: 'eip155:11155111',
+        transaction_id: 'tx-batch',
+      });
+
+    const sent = await gateway().sendCalls(
+      WALLET_ID,
+      {
+        chainId: 11155111,
+        calls: [
+          { to: TO, data: '0x1234' },
+          { to: TO, value: '0x0' },
+          { to: TO },
+        ],
+        idempotencyKey: 'idem-batch',
+      },
+      TEST_JWT,
+    );
+
+    expect(sent).toEqual({ transactionId: 'tx-batch' });
+    const [req] = recorded;
+    expect(req!.path).toBe(`/v1/wallets/${WALLET_ID}/rpc`);
+    expect(req!.body).toEqual({
+      method: 'wallet_sendCalls',
+      chain_type: 'ethereum',
+      caip2: 'eip155:11155111',
+      sponsor: true,
+      params: {
+        calls: [
+          { to: TO, data: '0x1234' },
+          { to: TO, value: '0x0' },
+          { to: TO },
+        ],
+      },
+    });
+    expect(req!.headers.get('privy-idempotency-key')).toBe('idem-batch');
+    expect(req!.headers.get('privy-authorization-signature')).toBeTruthy();
+  });
+
+  it('normalizes batch failures into UpstreamError', async () => {
+    await stubJwtExchange();
+    respond = () => ({ status: 400, body: { error: 'denied by policy' } });
+    const error = await gateway()
+      .sendCalls(
+        WALLET_ID,
+        { chainId: 11155111, calls: [{ to: TO }], idempotencyKey: 'idem-x' },
+        TEST_JWT,
+      )
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(UpstreamError);
+    expect((error as UpstreamError).operation).toBe(
+      'wallets.rpc.wallet_sendCalls',
+    );
+  });
 
   it('updates wallet policies with the user JWT as authorization', async () => {
     await stubJwtExchange();

@@ -2,6 +2,7 @@ import type {
   Address,
   ExportWalletRequest,
   ExportWalletResponse,
+  SendCallsRequest,
   SignMessageRequest,
   SignMessageResponse,
   SignableMessage,
@@ -26,25 +27,47 @@ export interface ChainConfig {
   /**
    * Ask Privy to sponsor gas. Sponsorship must also be enabled for this chain
    * in the Privy dashboard, and is not offered on every chain. A sponsored
-   * chain needs an `allow` list or an `authorizeTransaction` hook.
+   * chain needs an `allow` list or an `authorizeTransaction` hook. Batched
+   * calls (`sendCalls`) are accepted only on sponsored chains.
    */
   sponsor: boolean;
   /**
    * Transactions on this chain must go to one of `to` (compared without
    * regard to case) and carry at most `maxValue` wei, which defaults to `0n`.
-   * Calldata is not inspected; use `authorizeTransaction` for that.
+   * Calldata is not inspected; use `authorizeTransaction` for that. In a
+   * batch, every call must pass.
    */
   allow?: { to: readonly Address[]; maxValue?: bigint };
 }
 
+/** Where a call sits in its batch. */
+export interface BatchPosition {
+  /** Zero-based position of this call in the batch. */
+  index: number;
+  /** Number of calls in the batch. */
+  size: number;
+}
+
 /**
- * Host rule run before every send, after the chain's `allow` list. Only
- * `true` allows the transaction; `false`, any other value, a throw or a
- * rejection denies it with `POLICY_DENIED`. `tx` is the validated request.
+ * What `authorizeTransaction` sees: one validated transaction with
+ * checksummed addresses. For a call inside a batch, it carries the batch's
+ * `requestId`, `from` and `chainId`, and `batch` says where it sits. A
+ * single send has no `batch`.
+ */
+export interface TransactionAuthorizationRequest extends TransactionRequest {
+  batch?: Readonly<BatchPosition>;
+}
+
+/**
+ * Host rule run before every send, after the chain's `allow` list, and once
+ * per call of a batch, in order. Only `true` allows the transaction; `false`,
+ * any other value, a throw or a rejection denies it with `POLICY_DENIED`,
+ * and denying one call of a batch refuses the whole batch. `tx` is the
+ * validated request.
  */
 export type AuthorizeTransaction = (
   session: Session,
-  tx: Readonly<TransactionRequest>,
+  tx: Readonly<TransactionAuthorizationRequest>,
 ) => boolean | Promise<boolean>;
 
 /** What `authorizeMessage` sees: the checksummed address and the message. */
@@ -160,8 +183,22 @@ export interface EmbeddedWalletService {
     session: Session,
     request: TransactionRequest,
   ): Promise<TransactionResponse>;
+  /**
+   * Sends `request.calls` as one atomic, sponsored transaction (Privy
+   * `wallet_sendCalls`). Only on chains configured with `sponsor: true`,
+   * otherwise `BATCH_NOT_SUPPORTED`. Every call must pass the chain's
+   * `allow` list and `authorizeTransaction`; if any is refused, nothing is
+   * sent. Idempotent per `request.requestId` like `sendTransaction`. The
+   * result is read back with `getTransaction`.
+   */
+  sendCalls(
+    session: Session,
+    request: SendCallsRequest,
+  ): Promise<TransactionResponse>;
   /** Rejects ids that do not belong to the session's wallet. */
   getTransaction(session: Session, id: string): Promise<TransactionResponse>;
+  /** Chains on which `sendCalls` is accepted, ascending. */
+  readonly batchChainIds: readonly number[];
   /**
    * The wallet's private key, HPKE-encrypted by Privy to
    * `request.recipientPublicKey`. Only the holder of the matching private

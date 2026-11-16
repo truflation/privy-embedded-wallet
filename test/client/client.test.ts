@@ -4,6 +4,7 @@ import {
   EmbeddedWalletClientError,
   ERROR_CODE,
   type EmbeddedWalletClientOptions,
+  type SendCallsRequest,
 } from '../../src/client/index';
 import { WALLET_ADDRESS, errorResponse, jsonResponse } from './helpers';
 
@@ -99,6 +100,71 @@ describe('createEmbeddedWalletClient', () => {
     });
     expect(lastCall(fetch).url).toBe('/api/wallets/embedded/transactions');
     expect(JSON.parse(lastCall(fetch).init.body as string)).toEqual(request);
+  });
+
+  it('sendCalls posts the batch to /calls', async () => {
+    const { fetch, client } = setup(
+      jsonResponse({ id: 'b1', status: 'pending' }),
+    );
+    const request: SendCallsRequest = {
+      requestId: '7b0e7f0e-6f1c-4b8a-9d57-0d9d4a4e8c11',
+      from: WALLET_ADDRESS,
+      chainId: 11155111,
+      calls: [
+        { to: WALLET_ADDRESS, data: '0x1234' },
+        { to: WALLET_ADDRESS, value: '0x0' },
+      ],
+    };
+    await expect(client.sendCalls(request)).resolves.toEqual({
+      id: 'b1',
+      status: 'pending',
+    });
+    const call = lastCall(fetch);
+    expect(call.url).toBe('/api/wallets/embedded/calls');
+    expect(call.init.method).toBe('POST');
+    expect(JSON.parse(call.init.body as string)).toEqual(request);
+  });
+
+  it('reads batchChainIds from the wallet, dropping anything malformed', async () => {
+    await expect(
+      setup(
+        jsonResponse({ address: WALLET_ADDRESS, batchChainIds: [1, 11155111] }),
+      ).client.getWallet(),
+    ).resolves.toEqual({
+      address: WALLET_ADDRESS,
+      batchChainIds: [1, 11155111],
+    });
+    await expect(
+      setup(
+        jsonResponse({
+          address: WALLET_ADDRESS,
+          created: false,
+          batchChainIds: [1, '0x1', -1, 1.5, null],
+        }),
+      ).client.ensureWallet(),
+    ).resolves.toEqual({
+      address: WALLET_ADDRESS,
+      created: false,
+      batchChainIds: [1],
+    });
+    await expect(
+      setup(
+        jsonResponse({ address: WALLET_ADDRESS, batchChainIds: 'all' }),
+      ).client.getWallet(),
+    ).resolves.toEqual({ address: WALLET_ADDRESS });
+  });
+
+  it('reads the chain id of a transaction when the server reports one', async () => {
+    await expect(
+      setup(
+        jsonResponse({ id: 't', status: 'pending', chainId: 11155111 }),
+      ).client.getTransaction('t'),
+    ).resolves.toEqual({ id: 't', status: 'pending', chainId: 11155111 });
+    await expect(
+      setup(
+        jsonResponse({ id: 't', status: 'pending', chainId: '0x1' }),
+      ).client.getTransaction('t'),
+    ).resolves.toEqual({ id: 't', status: 'pending' });
   });
 
   it('getTransaction encodes the id', async () => {

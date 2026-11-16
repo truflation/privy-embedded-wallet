@@ -10,8 +10,14 @@ export const MAX_MESSAGE_BYTES = 16 * 1024;
 export const MAX_TRANSACTION_DATA_BYTES = 64 * 1024;
 
 /**
+ * Largest total `data` across the calls of one batch, in bytes. The same as
+ * one transaction's, so a batch never needs a larger request body.
+ */
+export const MAX_BATCH_DATA_BYTES = MAX_TRANSACTION_DATA_BYTES;
+
+/**
  * Largest request body read, in bytes. Large enough for the biggest valid
- * transaction (hex doubles the data size) plus JSON overhead.
+ * transaction or batch (hex doubles the data size) plus JSON overhead.
  */
 export const MAX_BODY_BYTES = MAX_TRANSACTION_DATA_BYTES * 2 + 4 * 1024;
 

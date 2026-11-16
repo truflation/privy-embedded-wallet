@@ -261,7 +261,16 @@ npx vitest run test/integration
   attaches a policy to a wallet and never sends a transaction. If a deletion
   fails, the log says so; remove the leftover policy in the dashboard.
 
-Both tests create data in the development app (a user and a wallet for the
+- Set `PRIVY_BATCH_TEST=1` as well to enable the sponsored batch test
+  (`test/integration/batch.test.ts`). It sends one real batch of two
+  zero-value calls from the wallet to itself on Sepolia (11155111) through
+  Privy's `wallet_sendCalls`, replays it with the same `requestId`, and polls
+  until it is confirmed (up to 3 minutes). It needs gas sponsorship enabled
+  for Sepolia in the development app and spends sponsored gas credits. If the
+  wallet carries a Privy policy without a `wallet_sendCalls` rule, expect
+  `POLICY_DENIED`.
+
+These tests create data in the development app (a user and a wallet for the
 token's subject). Use a development app only.
 
 ## Running the example

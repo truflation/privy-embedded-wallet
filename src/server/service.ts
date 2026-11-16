@@ -5,6 +5,7 @@ import {
   type Address,
   type ExportWalletResponse,
   type Hex,
+  type TransactionRequest,
   type TransactionResponse,
 } from '../protocol/index';
 import { passesHook, readAuthorizeHook } from './authorize-hooks';
@@ -29,7 +30,12 @@ import { UpstreamError } from './privy/upstream-error';
 import { provisionWallet } from './provisioning';
 import { createSessionCheck, readUserIdClaim } from './session';
 import type { WalletRecord, WalletStore } from './store';
-import { passesAllowList, readChains } from './transaction-rules';
+import {
+  passesAllowList,
+  readBatchChainIds,
+  readChains,
+  type ChainRules,
+} from './transaction-rules';
 import {
   isKnownPrivyStatus,
   mapTransactionStatus,
@@ -40,10 +46,12 @@ import type {
   EmbeddedWalletServiceConfig,
   EnsureWalletResult,
   Session,
+  TransactionAuthorizationRequest,
 } from './types';
 import {
   decodeCanonicalBase64,
   parseExportWalletRequest,
+  parseSendCallsRequest,
   parseSignMessageRequest,
   parseTransactionId,
   parseTransactionRequest,
@@ -119,6 +127,7 @@ export function createServiceWithGateway(
     'authorizeExport',
   );
   const chains = readChains(options.chains, authorizeHook !== null);
+  const batchChainIds = readBatchChainIds(chains);
   const policyIds = readPolicyIds(options.policyIds);
   const logger: Logger = options.logger ?? silentLogger;
   const assertSession = createSessionCheck(
@@ -155,6 +164,46 @@ export function createServiceWithGateway(
   function assertAccount(record: WalletRecord, expected: Address): void {
     if (!sameAddress(record.address, expected)) {
       throw walletError(ERROR_CODE.ACCOUNT_MISMATCH);
+    }
+  }
+
+  /**
+   * Rule 3: the host's rules run before anything reaches Privy. Every
+   * transaction must pass the chain's allow list, then the hook, in order.
+   * The allow list is checked for all of them before the hook sees any, so
+   * the hook never runs for a batch the static rules already refuse. The
+   * first refusal ends the check: a batch is all or nothing.
+   */
+  async function authorizeTransactions(
+    session: Session,
+    chain: ChainRules,
+    txs: readonly TransactionRequest[],
+    batched: boolean,
+  ): Promise<void> {
+    for (const [index, tx] of txs.entries()) {
+      if (!passesAllowList(chain, tx)) {
+        logger.warn('Transaction outside the chain allow list was refused', {
+          chainId: tx.chainId,
+          ...(batched ? { index } : {}),
+        });
+        throw walletError(ERROR_CODE.POLICY_DENIED);
+      }
+    }
+    for (const [index, tx] of txs.entries()) {
+      const input: TransactionAuthorizationRequest = batched
+        ? { ...tx, batch: Object.freeze({ index, size: txs.length }) }
+        : { ...tx };
+      if (
+        !(await passesHook(
+          authorizeHook,
+          { name: 'authorizeTransaction', subject: 'transaction' },
+          session,
+          Object.freeze(input),
+          logger,
+        ))
+      ) {
+        throw walletError(ERROR_CODE.POLICY_DENIED);
+      }
     }
   }
 
@@ -278,24 +327,7 @@ export function createServiceWithGateway(
       if (!chain) throw walletError(ERROR_CODE.CHAIN_NOT_SUPPORTED);
       const record = await requireRecord(session, ERROR_CODE.WALLET_NOT_FOUND);
       assertAccount(record, tx.from);
-      // Rule 3: the host's rules run before anything reaches Privy.
-      if (!passesAllowList(chain, tx)) {
-        logger.warn('Transaction outside the chain allow list was refused', {
-          chainId: tx.chainId,
-        });
-        throw walletError(ERROR_CODE.POLICY_DENIED);
-      }
-      if (
-        !(await passesHook(
-          authorizeHook,
-          { name: 'authorizeTransaction', subject: 'transaction' },
-          session,
-          Object.freeze({ ...tx }),
-          logger,
-        ))
-      ) {
-        throw walletError(ERROR_CODE.POLICY_DENIED);
-      }
+      await authorizeTransactions(session, chain, [tx], false);
       await guard('authorize', () => gateway.authorize(session.jwt));
       await ensurePolicies(record, session.jwt);
       // Rule 1. Both keys depend only on the user and the requestId, never on
@@ -339,6 +371,62 @@ export function createServiceWithGateway(
       return withHash({ id, status: TRANSACTION_STATUS.PENDING }, hash);
     },
 
+    async sendCalls(session, request) {
+      assertSession(session);
+      const parsed = parseSendCallsRequest(request);
+      const chain = chains.get(parsed.chainId);
+      if (!chain) throw walletError(ERROR_CODE.CHAIN_NOT_SUPPORTED);
+      // Without sponsorship the wallet is a plain EOA, which cannot execute
+      // a batch atomically. Refused before anything else is looked up.
+      if (!chain.sponsor) throw walletError(ERROR_CODE.BATCH_NOT_SUPPORTED);
+      const from = getAddress(parsed.from);
+      const record = await requireRecord(session, ERROR_CODE.WALLET_NOT_FOUND);
+      assertAccount(record, from);
+      // Each call is checked as the transaction it would be on its own,
+      // checksummed like a single send.
+      const txs: TransactionRequest[] = parsed.calls.map((call) => ({
+        requestId: parsed.requestId,
+        from,
+        chainId: parsed.chainId,
+        to: getAddress(call.to),
+        ...(call.data !== undefined ? { data: call.data } : {}),
+        ...(call.value !== undefined ? { value: call.value } : {}),
+      }));
+      await authorizeTransactions(session, chain, txs, true);
+      await guard('authorize', () => gateway.authorize(session.jwt));
+      await ensurePolicies(record, session.jwt);
+      // Rule 1, with the single send's idempotency key: one requestId can
+      // produce at most one send, single or batch. Privy's wallet_sendCalls
+      // takes no reference_id, so deduplication lasts only for Privy's
+      // idempotency window (24 hours), not beyond it.
+      const sent = await guard('send', () =>
+        gateway.sendCalls(
+          record.walletId,
+          {
+            chainId: parsed.chainId,
+            calls: txs.map(({ to, data, value }) => ({
+              to,
+              ...(data !== undefined ? { data } : {}),
+              ...(value !== undefined ? { value } : {}),
+            })),
+            idempotencyKey: sendIdempotencyKey(
+              session.userId,
+              parsed.requestId,
+            ),
+          },
+          session.jwt,
+        ),
+      );
+      if (!sent.transactionId) {
+        logger.error('Privy returned no transaction id for a batch', {
+          chainId: parsed.chainId,
+          walletId: record.walletId,
+        });
+        throw walletError(ERROR_CODE.PROVIDER_ERROR);
+      }
+      return { id: sent.transactionId, status: TRANSACTION_STATUS.PENDING };
+    },
+
     async getTransaction(session, id) {
       assertSession(session);
       const transactionId = parseTransactionId(id);
@@ -376,11 +464,18 @@ export function createServiceWithGateway(
         });
       }
       // Every status, failed included, carries the hash when Privy has one.
+      const chainId = chainIdFromCaip2(tx.caip2);
       return withHash(
-        { id: transactionId, status: mapTransactionStatus(tx.status) },
+        {
+          id: transactionId,
+          status: mapTransactionStatus(tx.status),
+          ...(chainId !== undefined ? { chainId } : {}),
+        },
         toTransactionHash(tx.hash),
       );
     },
+
+    batchChainIds,
 
     async exportWallet(session, request) {
       assertSession(session);
@@ -449,6 +544,14 @@ function toExportResponse(
     ciphertext: exported.ciphertext,
     encapsulatedKey: exported.encapsulatedKey,
   };
+}
+
+/** The chain id of an `eip155:<id>` CAIP-2 string, or undefined. */
+function chainIdFromCaip2(caip2: string | undefined): number | undefined {
+  const match = /^eip155:([1-9][0-9]{0,15})$/.exec(caip2 ?? '');
+  if (!match) return undefined;
+  const chainId = Number(match[1]);
+  return Number.isSafeInteger(chainId) ? chainId : undefined;
 }
 
 function withHash(
