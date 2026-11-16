@@ -1,0 +1,30 @@
+{
+  "name": "supabase-appkit-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "tsx server.ts",
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@reown/appkit": "1.8.17",
+    "@reown/appkit-adapter-wagmi": "1.8.17",
+    "@supabase/supabase-js": "^2.58.0",
+    "@truflation/privy-embedded-wallet": "file:../..",
+    "@wagmi/core": "3.3.2",
+    "jose": "^6.1.0",
+    "viem": "^2.45.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^6.0.3",
+    "vite": "^7.1.0"
+  },
+  "overrides": {
+    "wagmi": "3.3.2",
+    "@wagmi/connectors": "7.1.2"
+  }
+}

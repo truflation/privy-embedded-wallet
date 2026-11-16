@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Embedded wallet example</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 48rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      fieldset {
+        margin: 1rem 0;
+      }
+      input,
+      button {
+        font: inherit;
+        padding: 0.35rem 0.6rem;
+        margin: 0.15rem;
+      }
+      pre {
+        background: #f4f4f5;
+        padding: 0.75rem;
+        overflow-x: auto;
+      }
+      #notice {
+        color: #92400e;
+        min-height: 1.5em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Embedded wallet example</h1>
+    <p id="notice" data-testid="notice"></p>
+
+    <fieldset>
+      <legend>Account (Supabase)</legend>
+      <input id="email" type="email" placeholder="Email" autocomplete="email" />
+      <input
+        id="password"
+        type="password"
+        placeholder="Password"
+        autocomplete="current-password"
+      />
+      <button data-testid="sign-in">Sign in</button>
+      <button data-testid="sign-out">Sign out</button>
+    </fieldset>
+
+    <fieldset>
+      <legend>Wallet</legend>
+      <button data-testid="connect-embedded">Connect embedded</button>
+      <button data-testid="open-modal">Open modal</button>
+      <button data-testid="disconnect">Disconnect</button>
+      <button data-testid="sign-message">Sign message</button>
+      <button data-testid="switch-hoodi">Switch to Hoodi</button>
+      <button data-testid="switch-sepolia">Switch to Sepolia</button>
+      <button data-testid="send-tx">Send 0 value to self</button>
+      <p id="status" data-testid="status" role="status"></p>
+    </fieldset>
+
+    <pre data-testid="state"></pre>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
