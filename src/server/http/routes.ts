@@ -6,6 +6,7 @@ export type RouteMatch =
   | { name: 'wallet'; methods: readonly HttpMethod[] }
   | { name: 'signMessage'; methods: readonly HttpMethod[] }
   | { name: 'submitTransaction'; methods: readonly HttpMethod[] }
+  | { name: 'sendCalls'; methods: readonly HttpMethod[] }
   | { name: 'exportWallet'; methods: readonly HttpMethod[] }
   | { name: 'getTransaction'; methods: readonly HttpMethod[]; id: string };
 
@@ -24,6 +25,8 @@ export function matchRoute(path: string): RouteMatch | null {
       return { name: 'signMessage', methods: ['POST'] };
     case ROUTES.TRANSACTIONS:
       return { name: 'submitTransaction', methods: ['POST'] };
+    case ROUTES.CALLS:
+      return { name: 'sendCalls', methods: ['POST'] };
     case ROUTES.WALLET_EXPORT:
       return { name: 'exportWallet', methods: ['POST'] };
   }

@@ -2,10 +2,24 @@ import {
   TRANSACTION_STATUS,
   type Address,
   type Hex,
+  type SendCallsRequest,
   type SignableMessage,
   type TransactionRequest,
+  type TransactionResponse,
+  type WalletResponse,
 } from '../protocol/index';
 import { ERROR_CODE, type ErrorCode } from '../protocol/index';
+import {
+  CALLS_STATUS,
+  EIP5792_VERSION,
+  callsStatusCode,
+  capabilitiesFor,
+  parseSendCallsParams,
+  toCallsReceipt,
+  toChainNumber,
+  toHexQuantity,
+  type CallsStatus,
+} from './calls';
 import type { EmbeddedWalletClient } from './client';
 import { EmbeddedWalletClientError } from './errors';
 import {
@@ -67,6 +81,16 @@ export interface CreateEmbeddedProviderOptions {
    * The connector uses it to persist the chain and emit its own event.
    */
   onChainChanged?: (chainId: number) => void | Promise<void>;
+  /**
+   * Reads a transaction receipt (`eth_getTransactionReceipt`) from a node,
+   * so `wallet_getCallsStatus` can include receipts. Resolve null when the
+   * node does not have it yet. Without it, statuses carry no receipts. The
+   * wagmi connector supplies one from the config's transports.
+   */
+  getTransactionReceipt?: (request: {
+    chainId: number;
+    hash: Hex;
+  }) => Promise<unknown>;
 }
 
 type Params = readonly unknown[];
@@ -83,15 +107,17 @@ const sameAddress = (a: string, b: string) =>
 const invalidParams = (message: string) =>
   new EmbeddedProviderError(RPC_ERROR_CODE.INVALID_PARAMS, message);
 
-function toChainNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
-  if (typeof value === 'string' && /^0x[0-9a-fA-F]+$/.test(value)) {
-    return Number.parseInt(value, 16);
-  }
-  return null;
+/** The wallet as the provider caches it. */
+interface CachedWallet {
+  address: Address;
+  /** Chains the server batches on. Empty for servers older than 0.2.0. */
+  batchChainIds: readonly number[];
 }
 
-const toHexQuantity = (n: number) => `0x${n.toString(16)}`;
+const toCachedWallet = (wallet: WalletResponse): CachedWallet => ({
+  address: wallet.address,
+  batchChainIds: wallet.batchChainIds ?? [],
+});
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -110,7 +136,7 @@ export function createEmbeddedProvider(
     chainIds.includes(options.initialChainId)
       ? options.initialChainId
       : chainIds[0];
-  let cachedAddress: Address | null = null;
+  let cachedWallet: CachedWallet | null = null;
   const listeners = new Map<string, Set<(...args: never[]) => void>>();
 
   function emit(event: string, ...args: unknown[]) {
@@ -121,7 +147,7 @@ export function createEmbeddedProvider(
 
   /** Drops the cached address and tells listeners the account is gone. */
   function accountLost() {
-    cachedAddress = null;
+    cachedWallet = null;
     emit('accountsChanged', []);
   }
 
@@ -152,11 +178,12 @@ export function createEmbeddedProvider(
     sendTransaction: guarded((request) =>
       options.client.sendTransaction(request),
     ),
+    sendCalls: guarded((request) => options.client.sendCalls(request)),
     getTransaction: guarded((id) => options.client.getTransaction(id)),
   };
 
-  async function requireWalletAddress(): Promise<Address> {
-    if (cachedAddress) return cachedAddress;
+  async function requireWallet(): Promise<CachedWallet> {
+    if (cachedWallet) return cachedWallet;
     const wallet = await client.getWallet();
     if (!wallet) {
       throw new EmbeddedProviderError(
@@ -164,14 +191,16 @@ export function createEmbeddedProvider(
         'No wallet is available for this account.',
       );
     }
-    cachedAddress = wallet.address;
-    return cachedAddress;
+    cachedWallet = toCachedWallet(wallet);
+    return cachedWallet;
   }
+
+  const requireWalletAddress = async () => (await requireWallet()).address;
 
   async function accounts(create: boolean): Promise<Address[]> {
     if (create) {
-      cachedAddress = (await client.ensureWallet()).address;
-      return [cachedAddress];
+      cachedWallet = toCachedWallet(await client.ensureWallet());
+      return [cachedWallet.address];
     }
     try {
       return [await requireWalletAddress()];
@@ -231,16 +260,19 @@ export function createEmbeddedProvider(
     );
 
   /** Submits once per intent. Ambiguous failures retry with the same requestId. */
-  async function submit(request: TransactionRequest) {
+  async function submit(
+    requestId: string,
+    send: () => Promise<TransactionResponse>,
+  ) {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await client.sendTransaction(request);
+        return await send();
       } catch (error) {
         if (attempt < SEND_RETRIES && isAmbiguousSendFailure(error)) {
           await sleep(SEND_RETRY_DELAY_MS * (attempt + 1));
           continue;
         }
-        throw withErrorData(error, { requestId: request.requestId });
+        throw withErrorData(error, { requestId });
       }
     }
   }
@@ -266,12 +298,131 @@ export function createEmbeddedProvider(
     if (tx.data !== undefined) request.data = tx.data;
     if (tx.value !== undefined) request.value = tx.value;
 
-    const submitted = await submit(request);
+    const submitted = await submit(request.requestId, () =>
+      client.sendTransaction(request),
+    );
     const { hash } = submitted;
     if (submitted.status === TRANSACTION_STATUS.FAILED) {
       throw failedTransaction(request.requestId, submitted.id, hash);
     }
     return hash ?? waitForHash(submitted.id, request.requestId);
+  }
+
+  /**
+   * EIP-5792 `wallet_sendCalls`. Resolves with the batch id as soon as the
+   * server accepts the batch; `wallet_getCallsStatus` reports its progress.
+   * One requestId per call of this method, reused on ambiguous retries.
+   */
+  async function sendCalls(params: Params): Promise<{ id: string }> {
+    const wallet = await requireWallet();
+    const batch = parseSendCallsParams(params[0], {
+      wallet: wallet.address,
+      currentChainId: chainId,
+      chainIds,
+      batchChainIds: wallet.batchChainIds,
+    });
+    const request: SendCallsRequest = {
+      requestId: crypto.randomUUID(),
+      from: wallet.address,
+      chainId: batch.chainId,
+      calls: batch.calls,
+    };
+    const submitted = await submit(request.requestId, () =>
+      client.sendCalls(request),
+    );
+    return { id: submitted.id };
+  }
+
+  /** EIP-5792 `wallet_getCallsStatus` for an id from `wallet_sendCalls`. */
+  async function getCallsStatus(params: Params): Promise<CallsStatus> {
+    const id = params[0];
+    if (typeof id !== 'string' || id.length === 0) {
+      throw invalidParams('wallet_getCallsStatus expects [id].');
+    }
+    let tx: TransactionResponse;
+    try {
+      tx = await client.getTransaction(id);
+    } catch (error) {
+      if (
+        error instanceof EmbeddedWalletClientError &&
+        (error.code === ERROR_CODE.TRANSACTION_NOT_FOUND ||
+          error.code === ERROR_CODE.INVALID_REQUEST)
+      ) {
+        throw new EmbeddedProviderError(
+          RPC_ERROR_CODE.UNKNOWN_BUNDLE_ID,
+          'No batch with this id exists for this wallet.',
+        );
+      }
+      throw error;
+    }
+    const txChainId = tx.chainId ?? chainId;
+    let status = callsStatusCode(tx);
+    let receipts: CallsStatus['receipts'];
+    if (tx.hash && status !== CALLS_STATUS.PENDING) {
+      const fetchReceipt = options.getTransactionReceipt;
+      const receipt = fetchReceipt
+        ? toCallsReceipt(
+            await fetchReceipt({ chainId: txChainId, hash: tx.hash }),
+          )
+        : null;
+      if (receipt) receipts = [receipt];
+      // Confirmed but not yet visible to the app's node: report pending, so
+      // the app does not read state the node cannot show yet.
+      else if (fetchReceipt && status === CALLS_STATUS.CONFIRMED) {
+        status = CALLS_STATUS.PENDING;
+      }
+    }
+    return {
+      version: EIP5792_VERSION,
+      id,
+      chainId: toHexQuantity(txChainId),
+      status,
+      atomic: true,
+      ...(receipts ? { receipts } : {}),
+    };
+  }
+
+  /**
+   * EIP-5792 `wallet_getCapabilities`: `atomic` per configured chain,
+   * `supported` exactly where the server accepts a batch.
+   */
+  async function getCapabilities(params: Params) {
+    const [address, requested] = params;
+    if (
+      address !== undefined &&
+      address !== null &&
+      typeof address !== 'string'
+    ) {
+      throw invalidParams(
+        'wallet_getCapabilities expects [address, chainIds?].',
+      );
+    }
+    const wallet = await requireWallet();
+    if (typeof address === 'string' && !sameAddress(wallet.address, address)) {
+      throw new EmbeddedProviderError(
+        RPC_ERROR_CODE.UNAUTHORIZED,
+        'The requested address is not the connected wallet.',
+      );
+    }
+    let selected: readonly number[] = chainIds;
+    if (requested !== undefined && requested !== null) {
+      if (!Array.isArray(requested)) {
+        throw invalidParams(
+          'wallet_getCapabilities chainIds must be an array.',
+        );
+      }
+      const wanted = new Set(
+        requested.map((value: unknown) => {
+          const parsed = toChainNumber(value);
+          if (parsed === null) {
+            throw invalidParams('wallet_getCapabilities chainIds must be hex.');
+          }
+          return parsed;
+        }),
+      );
+      selected = chainIds.filter((id) => wanted.has(id));
+    }
+    return capabilitiesFor(selected, wallet.batchChainIds);
   }
 
   async function switchChain(params: Params): Promise<null> {
@@ -306,6 +457,12 @@ export function createEmbeddedProvider(
         return personalSign(params);
       case 'eth_sendTransaction':
         return sendTransaction(params);
+      case 'wallet_sendCalls':
+        return sendCalls(params);
+      case 'wallet_getCallsStatus':
+        return getCallsStatus(params);
+      case 'wallet_getCapabilities':
+        return getCapabilities(params);
       case 'wallet_switchEthereumChain':
         return switchChain(params);
       default:
@@ -340,7 +497,7 @@ export function createEmbeddedProvider(
       if (chainIds.includes(next)) chainId = next;
     },
     reset() {
-      cachedAddress = null;
+      cachedWallet = null;
     },
   };
 }

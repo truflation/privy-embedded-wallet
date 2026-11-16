@@ -86,6 +86,17 @@ export function embeddedWallet(options: EmbeddedWalletOptions) {
           await persistChain(chainId);
           config.emitter.emit('change', { chainId });
         },
+        // Receipts for `wallet_getCallsStatus`, read through the app's own
+        // transport for that chain. No transport means no receipts.
+        getTransactionReceipt: async ({ chainId, hash }) => {
+          const transport = config.transports?.[chainId];
+          const chain = config.chains.find((c) => c.id === chainId);
+          if (!transport || !chain) return null;
+          return transport({ chain }).request({
+            method: 'eth_getTransactionReceipt',
+            params: [hash],
+          });
+        },
       });
 
       /** The provider reports a lost account here, which wagmi sees as `disconnect`. */

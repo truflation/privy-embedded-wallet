@@ -10,6 +10,7 @@ import { MAX_BODY_BYTES } from '../../src/server/limits';
 import type { EmbeddedWalletService } from '../../src/server/types';
 import { UPSTREAM_SECRET_TEXT, upstream } from './fake-gateway';
 import {
+  HOODI,
   SEPOLIA,
   TEST_JWT,
   TO,
@@ -30,6 +31,18 @@ const txBody = (from: unknown, extra: Record<string, unknown> = {}) => ({
   from,
   chainId: SEPOLIA,
   to: TO,
+  ...extra,
+});
+
+/** A valid POST /calls body. */
+const callsBody = (from: unknown, extra: Record<string, unknown> = {}) => ({
+  requestId: REQUEST_ID,
+  from,
+  chainId: SEPOLIA,
+  calls: [
+    { to: TO, data: '0x1234' },
+    { to: TO, value: '0x0' },
+  ],
   ...extra,
 });
 
@@ -114,6 +127,7 @@ describe('authentication', () => {
         auth: false,
       }),
       request(ROUTES.TRANSACTIONS, { body: txBody(TO), auth: false }),
+      request(ROUTES.CALLS, { body: callsBody(TO), auth: false }),
       request(`${ROUTES.TRANSACTIONS}/tx1`, { auth: false }),
       request('/nope', { auth: false }),
     ]) {
@@ -152,15 +166,24 @@ describe('routes', () => {
     const created = await expectOk(
       await handle(request(ROUTES.WALLET, { method: 'POST' })),
     );
-    expect(created).toEqual({ address: expect.any(String), created: true });
+    expect(created).toEqual({
+      address: expect.any(String),
+      created: true,
+      batchChainIds: [SEPOLIA],
+    });
 
     const again = await expectOk(
       await handle(request(ROUTES.WALLET, { body: {} })),
     );
-    expect(again).toEqual({ address: created.address, created: false });
+    expect(again).toEqual({
+      address: created.address,
+      created: false,
+      batchChainIds: [SEPOLIA],
+    });
 
     expect(await expectOk(await handle(request(ROUTES.WALLET)))).toEqual({
       address: created.address,
+      batchChainIds: [SEPOLIA],
     });
   });
 
@@ -198,6 +221,74 @@ describe('routes', () => {
       await handle(request(`${ROUTES.TRANSACTIONS}/${String(sent.id)}`)),
     );
     expect(read).toEqual({ id: sent.id, status: 'pending' });
+  });
+
+  it('POST /calls submits a batch and GET /transactions/:id reads it', async () => {
+    const { handle, createWallet, fake } = createHandler();
+    const address = await createWallet();
+    const sent = await expectOk(
+      await handle(request(ROUTES.CALLS, { body: callsBody(address) })),
+    );
+    expect(sent).toEqual({ id: expect.any(String), status: 'pending' });
+    expect(fake.calls.sendCalls).toHaveLength(1);
+    expect(fake.calls.sendCalls[0]!.input.calls).toHaveLength(2);
+    const read = await expectOk(
+      await handle(request(`${ROUTES.TRANSACTIONS}/${String(sent.id)}`)),
+    );
+    expect(read).toEqual({ id: sent.id, status: 'pending', chainId: SEPOLIA });
+  });
+
+  it('answers a repeated POST /calls with the original batch', async () => {
+    const { handle, createWallet, fake } = createHandler();
+    const address = await createWallet();
+    const first = await expectOk(
+      await handle(request(ROUTES.CALLS, { body: callsBody(address) })),
+    );
+    const replay = await expectOk(
+      await handle(request(ROUTES.CALLS, { body: callsBody(address) })),
+    );
+    expect(replay).toEqual(first);
+    expect(fake.transactions.size).toBe(1);
+  });
+
+  it('maps batch refusals to the same statuses as a single send', async () => {
+    const { handle, createWallet, service, fake } = createHandler();
+    const address = await createWallet();
+    const other = await service.ensureWallet(otherSession);
+    await expectError(
+      await handle(request(ROUTES.CALLS, { body: callsBody(other.address) })),
+      409,
+      ERROR_CODE.ACCOUNT_MISMATCH,
+    );
+    await expectError(
+      await handle(
+        request(ROUTES.CALLS, {
+          body: callsBody(address, {
+            calls: [
+              { to: TO },
+              { to: '0x2222222222222222222222222222222222222222' },
+            ],
+          }),
+        }),
+      ),
+      403,
+      ERROR_CODE.POLICY_DENIED,
+    );
+    await expectError(
+      await handle(
+        request(ROUTES.CALLS, { body: callsBody(address, { chainId: HOODI }) }),
+      ),
+      400,
+      ERROR_CODE.BATCH_NOT_SUPPORTED,
+    );
+    await expectError(
+      await handle(
+        request(ROUTES.CALLS, { body: callsBody(address, { chainId: 1 }) }),
+      ),
+      400,
+      ERROR_CODE.CHAIN_NOT_SUPPORTED,
+    );
+    expect(fake.calls.sendCalls).toHaveLength(0);
   });
 
   it('answers a repeated POST /transactions with the original transaction', async () => {
@@ -298,6 +389,7 @@ describe('routes', () => {
       [ROUTES.WALLET, 'DELETE', 'GET, POST'],
       [ROUTES.SIGN_MESSAGE, 'GET', 'POST'],
       [ROUTES.TRANSACTIONS, 'GET', 'POST'],
+      [ROUTES.CALLS, 'GET', 'POST'],
       [`${ROUTES.TRANSACTIONS}/tx1`, 'POST', 'GET'],
       [ROUTES.WALLET, 'OPTIONS', 'GET, POST'],
     ];
@@ -370,6 +462,7 @@ describe('origin and content type', () => {
         ROUTES.WALLET,
         ROUTES.SIGN_MESSAGE,
         ROUTES.TRANSACTIONS,
+        ROUTES.CALLS,
       ]) {
         await expectError(
           await handle(request(path, { body: {}, origin })),
@@ -580,6 +673,51 @@ describe('body validation', () => {
     ['an unknown field', txBody(TO, { gas: '0x5208' })],
   ])('rejects %s on POST /transactions', async (_, body) => {
     await expectInvalid(ROUTES.TRANSACTIONS, { body });
+  });
+
+  it.each([
+    ['a missing requestId', callsBody(TO, { requestId: undefined })],
+    ['a non-UUID requestId', callsBody(TO, { requestId: 'retry-1' })],
+    ['a malformed from', callsBody('0x1234')],
+    ['a string chainId', callsBody(TO, { chainId: '0xaa36a7' })],
+    ['missing calls', callsBody(TO, { calls: undefined })],
+    ['calls that are not an array', callsBody(TO, { calls: { to: TO } })],
+    ['an empty batch', callsBody(TO, { calls: [] })],
+    [
+      'more than MAX_BATCH_CALLS calls',
+      callsBody(TO, { calls: Array.from({ length: 11 }, () => ({ to: TO })) }),
+    ],
+    ['a call that is not an object', callsBody(TO, { calls: [TO] })],
+    ['a call without to', callsBody(TO, { calls: [{ data: '0x' }] })],
+    ['a call with a short to', callsBody(TO, { calls: [{ to: '0x1234' }] })],
+    [
+      'a call with odd-length data',
+      callsBody(TO, { calls: [{ to: TO }, { to: TO, data: '0x123' }] }),
+    ],
+    [
+      'a call with a decimal value',
+      callsBody(TO, { calls: [{ to: TO, value: '100' }] }),
+    ],
+    [
+      'a call with an unknown field',
+      callsBody(TO, { calls: [{ to: TO, gas: '0x5208' }] }),
+    ],
+    [
+      'a call with its own chainId',
+      callsBody(TO, { calls: [{ to: TO, chainId: SEPOLIA }] }),
+    ],
+    [
+      'more than 64 KiB of data in total',
+      callsBody(TO, {
+        calls: [
+          { to: TO, data: `0x${'00'.repeat(32 * 1024)}` },
+          { to: TO, data: `0x${'00'.repeat(32 * 1024 + 1)}` },
+        ],
+      }),
+    ],
+    ['an unknown field', callsBody(TO, { to: TO })],
+  ])('rejects %s on POST /calls', async (_, body) => {
+    await expectInvalid(ROUTES.CALLS, { body });
   });
 
   it('rejects a malformed transaction id', async () => {

@@ -5,6 +5,7 @@ import type { EmbeddedWalletService, Session } from '../types';
 import {
   parseEmptyBody,
   parseExportWalletRequest,
+  parseSendCallsRequest,
   parseSignMessageRequest,
   parseTransactionRequest,
 } from '../validation';
@@ -104,7 +105,10 @@ export function createRequestHandler(
       if (route.name === 'wallet') {
         const wallet = await service.getWallet(session);
         if (!wallet) return errorResponse(ERROR_CODE.WALLET_NOT_FOUND);
-        return jsonResponse(200, { address: wallet.address });
+        return jsonResponse(200, {
+          address: wallet.address,
+          batchChainIds: service.batchChainIds,
+        });
       }
       if (route.name === 'getTransaction') {
         return jsonResponse(
@@ -134,6 +138,7 @@ export function createRequestHandler(
         return jsonResponse(200, {
           address: wallet.address,
           created: wallet.created,
+          batchChainIds: service.batchChainIds,
         });
       }
       case 'signMessage': {
@@ -146,6 +151,10 @@ export function createRequestHandler(
       case 'submitTransaction': {
         const tx = parseTransactionRequest(parsed);
         return jsonResponse(200, await service.sendTransaction(session, tx));
+      }
+      case 'sendCalls': {
+        const batch = parseSendCallsRequest(parsed);
+        return jsonResponse(200, await service.sendCalls(session, batch));
       }
       case 'exportWallet': {
         const exportRequest = parseExportWalletRequest(parsed);

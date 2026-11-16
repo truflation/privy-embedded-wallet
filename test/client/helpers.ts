@@ -37,6 +37,10 @@ export function createFakeClient(
       status: 'pending',
       hash: '0xabc',
     })),
+    sendCalls: vi.fn(async (): Promise<TransactionResponse> => ({
+      id: 'batch-1',
+      status: 'pending',
+    })),
     getTransaction: vi.fn(async (): Promise<TransactionResponse> => ({
       id: 'tx-1',
       status: 'pending',

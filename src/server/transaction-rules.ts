@@ -85,3 +85,19 @@ export function passesAllowList(
   const value = tx.value === undefined ? 0n : BigInt(tx.value);
   return value <= rules.allow.maxValue;
 }
+
+/**
+ * Chains that accept batched calls: the sponsored ones, ascending. A
+ * sponsored wallet is an EIP-7702 delegated account that can execute calls
+ * atomically; an unsponsored one is a plain EOA and cannot.
+ */
+export function readBatchChainIds(
+  chains: ReadonlyMap<number, ChainRules>,
+): readonly number[] {
+  return Object.freeze(
+    [...chains]
+      .filter(([, rules]) => rules.sponsor)
+      .map(([chainId]) => chainId)
+      .sort((a, b) => a - b),
+  );
+}

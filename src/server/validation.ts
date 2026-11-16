@@ -1,15 +1,19 @@
 import { hexToBytes, isAddress } from 'viem';
 import {
   ERROR_CODE,
+  MAX_BATCH_CALLS,
   type Address,
+  type BatchCall,
   type ExportWalletRequest,
   type Hex,
   type SignMessageRequest,
+  type SendCallsRequest,
   type SignableMessage,
   type TransactionRequest,
 } from '../protocol/index';
 import { walletError } from './errors';
 import {
+  MAX_BATCH_DATA_BYTES,
   MAX_MESSAGE_BYTES,
   MAX_TRANSACTION_DATA_BYTES,
   MAX_TRANSACTION_ID_LENGTH,
@@ -143,6 +147,25 @@ export function parseRequestId(value: unknown): string {
   return value.toLowerCase();
 }
 
+/**
+ * The fields a transaction and a batch call share, validated the same way.
+ * `prefix` names the call in error messages, for example `calls[1].`.
+ */
+function parseCallFields(object: PlainObject, prefix: string): BatchCall {
+  const call: BatchCall = { to: parseAddress(object.to, `${prefix}to`) };
+  if (object.data !== undefined) {
+    call.data = expectHexBytes(
+      object.data,
+      `${prefix}data`,
+      MAX_TRANSACTION_DATA_BYTES,
+    );
+  }
+  if (object.value !== undefined) {
+    call.value = parseQuantity(object.value, `${prefix}value`);
+  }
+  return call;
+}
+
 export function parseTransactionRequest(body: unknown): TransactionRequest {
   const object = expectObject(body, 'body', [
     'requestId',
@@ -152,23 +175,50 @@ export function parseTransactionRequest(body: unknown): TransactionRequest {
     'data',
     'value',
   ]);
-  const request: TransactionRequest = {
-    requestId: parseRequestId(object.requestId),
-    from: parseAddress(object.from, 'from'),
-    chainId: parseChainId(object.chainId),
-    to: parseAddress(object.to, 'to'),
-  };
-  if (object.data !== undefined) {
-    request.data = expectHexBytes(
-      object.data,
-      'data',
-      MAX_TRANSACTION_DATA_BYTES,
+  const requestId = parseRequestId(object.requestId);
+  const from = parseAddress(object.from, 'from');
+  const chainId = parseChainId(object.chainId);
+  return { requestId, from, chainId, ...parseCallFields(object, '') };
+}
+
+/**
+ * A batch: between 1 and `MAX_BATCH_CALLS` calls, each validated exactly
+ * like a single transaction, with at most `MAX_BATCH_DATA_BYTES` of `data`
+ * in total.
+ */
+export function parseSendCallsRequest(body: unknown): SendCallsRequest {
+  const object = expectObject(body, 'body', [
+    'requestId',
+    'from',
+    'chainId',
+    'calls',
+  ]);
+  const requestId = parseRequestId(object.requestId);
+  const from = parseAddress(object.from, 'from');
+  const chainId = parseChainId(object.chainId);
+  const raw = object.calls;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw invalid('calls must be a non-empty array.');
+  }
+  if (raw.length > MAX_BATCH_CALLS) {
+    throw invalid(`calls must have at most ${MAX_BATCH_CALLS} entries.`);
+  }
+  let dataBytes = 0;
+  const calls = raw.map((entry: unknown, index) => {
+    const name = `calls[${index}]`;
+    const call = parseCallFields(
+      expectObject(entry, name, ['to', 'data', 'value']),
+      `${name}.`,
+    );
+    dataBytes += call.data === undefined ? 0 : (call.data.length - 2) / 2;
+    return call;
+  });
+  if (dataBytes > MAX_BATCH_DATA_BYTES) {
+    throw invalid(
+      `calls must carry at most ${MAX_BATCH_DATA_BYTES} bytes of data in total.`,
     );
   }
-  if (object.value !== undefined) {
-    request.value = parseQuantity(object.value, 'value');
-  }
-  return request;
+  return { requestId, from, chainId, calls };
 }
 
 export function parseTransactionId(value: unknown): string {

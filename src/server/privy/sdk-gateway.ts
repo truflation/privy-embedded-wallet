@@ -12,7 +12,9 @@ import {
   type PrivyGateway,
   type PrivyTransactionRef,
   type PrivyWalletRef,
+  type SendCallsInput,
   type SendTransactionInput,
+  type SentCalls,
   type SentTransaction,
 } from './gateway';
 import { toUpstreamError } from './upstream-error';
@@ -200,6 +202,30 @@ export function createSdkGateway(config: SdkGatewayConfig): PrivyGateway {
       return { hash: sent.hash, transactionId: sent.transaction_id };
     },
 
+    async sendCalls(walletId, input: SendCallsInput, jwt): Promise<SentCalls> {
+      // Always sponsored: the service only batches on sponsored chains,
+      // because an unsponsored wallet is a plain EOA and cannot batch.
+      const sent = await call('wallets.rpc.wallet_sendCalls', () =>
+        privy
+          .wallets()
+          .ethereum()
+          .sendCalls(walletId, {
+            caip2: caip2(input.chainId),
+            sponsor: true,
+            params: {
+              calls: input.calls.map((c) => ({
+                to: c.to,
+                ...(c.data !== undefined ? { data: c.data } : {}),
+                ...(c.value !== undefined ? { value: c.value } : {}),
+              })),
+            },
+            authorization_context: { user_jwts: [jwt] },
+            idempotency_key: input.idempotencyKey,
+          }),
+      );
+      return { transactionId: sent.transaction_id };
+    },
+
     async getTransaction(transactionId): Promise<PrivyTransactionRef> {
       const tx = await call('transactions.get', () =>
         privy.transactions().get(transactionId),
@@ -209,6 +235,7 @@ export function createSdkGateway(config: SdkGatewayConfig): PrivyGateway {
         walletId: tx.wallet_id,
         status: tx.status,
         hash: tx.transaction_hash,
+        caip2: tx.caip2,
       };
     },
 

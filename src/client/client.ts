@@ -7,6 +7,7 @@ import {
   type ExportWalletRequest,
   type ExportWalletResponse,
   type Hex,
+  type SendCallsRequest,
   type SignMessageRequest,
   type SignMessageResponse,
   type TransactionRequest,
@@ -37,6 +38,11 @@ export interface EmbeddedWalletClient {
   ensureWallet(): Promise<WalletResponse>;
   signMessage(request: SignMessageRequest): Promise<SignMessageResponse>;
   sendTransaction(request: TransactionRequest): Promise<TransactionResponse>;
+  /**
+   * Sends a batch as one atomic transaction. Only on chains the wallet
+   * response lists in `batchChainIds`; elsewhere `BATCH_NOT_SUPPORTED`.
+   */
+  sendCalls(request: SendCallsRequest): Promise<TransactionResponse>;
   getTransaction(id: string): Promise<TransactionResponse>;
   /**
    * Raw export call: returns ciphertext only. Use `exportPrivateKey`, which
@@ -55,10 +61,18 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isHexString = (value: unknown): value is Hex =>
   typeof value === 'string' && /^0x[0-9a-fA-F]*$/.test(value);
 
+const isChainId = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+
 function parseWallet(body: unknown): WalletResponse | null {
   if (!isRecord(body) || !isHexString(body.address)) return null;
   const wallet: WalletResponse = { address: body.address as Address };
   if (typeof body.created === 'boolean') wallet.created = body.created;
+  // A malformed list is treated as no batching, never as a parse failure,
+  // so an unexpected value cannot break the single-send path.
+  if (Array.isArray(body.batchChainIds)) {
+    wallet.batchChainIds = body.batchChainIds.filter(isChainId);
+  }
   return wallet;
 }
 
@@ -82,6 +96,7 @@ function parseTransaction(body: unknown): TransactionResponse | null {
     status: body.status as TransactionResponse['status'],
   };
   if (body.hash !== undefined) tx.hash = body.hash;
+  if (isChainId(body.chainId)) tx.chainId = body.chainId;
   return tx;
 }
 
@@ -208,6 +223,8 @@ export function createEmbeddedWalletClient(
       required('POST', ROUTES.SIGN_MESSAGE, request, parseSignature),
     sendTransaction: (request) =>
       required('POST', ROUTES.TRANSACTIONS, request, parseTransaction),
+    sendCalls: (request) =>
+      required('POST', ROUTES.CALLS, request, parseTransaction),
     getTransaction: (id) =>
       required(
         'GET',

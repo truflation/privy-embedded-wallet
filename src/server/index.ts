@@ -9,6 +9,7 @@ export type {
   AuthorizeExport,
   AuthorizeMessage,
   AuthorizeTransaction,
+  BatchPosition,
   ChainConfig,
   EmbeddedWalletService,
   EmbeddedWalletServiceConfig,
@@ -17,6 +18,7 @@ export type {
   MessageAuthorizationRequest,
   Session,
   SignMessageOptions,
+  TransactionAuthorizationRequest,
   WalletResult,
 } from './types';
 

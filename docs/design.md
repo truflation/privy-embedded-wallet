@@ -14,7 +14,8 @@ each account a Privy embedded wallet, without Privy's React SDK:
 3. Privy holds the wallet key. The site's server asks Privy to sign, proving
    the user's consent with that same JWT on every request.
 4. In the browser the wallet appears as a normal wagmi connector, so existing
-   wagmi code (reads, `signMessage`, `sendTransaction`) works unchanged.
+   wagmi code (reads, `signMessage`, `sendTransaction`) works unchanged, and
+   on sponsored chains wagmi's EIP-5792 `sendCalls` sends atomic batches.
 
 The package never handles login. It takes a JWT and returns a wallet.
 
@@ -72,14 +73,18 @@ body.
 | `ensureWallet(session)`                   | `{ address, created }`. Finds or creates the Privy user and a user-owned wallet. Idempotent and safe under concurrent calls. |
 | `signMessage(session, request, options?)` | `{ signature }` using `personal_sign`. `options.trusted` skips `authorizeMessage` (rule 11).                                 |
 | `sendTransaction(session, request)`       | `{ id, status, hash? }`. Sponsored when the chain config says so.                                                            |
-| `getTransaction(session, id)`             | `{ id, status, hash? }`. Rejects ids that do not belong to the session's wallet.                                             |
+| `sendCalls(session, request)`             | `{ id, status }`. An atomic, sponsored batch through Privy `wallet_sendCalls` (rule 13). Sponsored chains only.              |
+| `getTransaction(session, id)`             | `{ id, status, hash?, chainId? }`. Rejects ids that do not belong to the session's wallet.                                   |
+| `batchChainIds`                           | The sponsored chain ids, ascending: where `sendCalls` is accepted. Served on `GET` and `POST /wallet`.                       |
 | `exportWallet(session, request)`          | `{ ciphertext, encapsulatedKey }`: the private key, HPKE-encrypted by Privy to the browser's key (rule 12).                  |
 
 Rules:
 
 - Sponsored sends can return before a hash exists. `sendTransaction` returns
   what it has. `getTransaction` is the polling path.
-- A chain missing from `chains` is rejected with `CHAIN_NOT_SUPPORTED`.
+- A chain missing from `chains` is rejected with `CHAIN_NOT_SUPPORTED`. A
+  batch on a configured chain without `sponsor: true` is rejected with
+  `BATCH_NOT_SUPPORTED`.
 - Typed-data signing is out of scope until a consumer needs it.
 - Failures are thrown as `EmbeddedWalletError` with a `code` from
   `ERROR_CODE` in the protocol. A JWT that Privy rejects maps to
@@ -163,9 +168,18 @@ const connector = embeddedWallet({
   `EmbeddedWalletClientError` carrying the protocol `code`.
 - `createEmbeddedProvider` is the EIP-1193 provider. It supports
   `eth_accounts`, `eth_requestAccounts`, `eth_chainId`, `personal_sign`,
-  `eth_sendTransaction` and `wallet_switchEthereumChain`. Everything else
-  fails with EIP-1193 code 4200. `eth_sendTransaction` submits, then polls
-  until a hash exists, and resolves with the hash.
+  `eth_sendTransaction`, `wallet_switchEthereumChain`, and the EIP-5792
+  methods `wallet_sendCalls`, `wallet_getCallsStatus` and
+  `wallet_getCapabilities` in the 2.0.0 form viem implements. Everything
+  else fails with EIP-1193 code 4200. `eth_sendTransaction` submits, then
+  polls until a hash exists, and resolves with the hash. `wallet_sendCalls`
+  submits and resolves with `{ id }` at once; `wallet_getCallsStatus` maps
+  the transaction status (`pending` 100, `confirmed` 200, `failed` with a
+  hash 500, without 400) and adds the receipt when the optional
+  `getTransactionReceipt` reader has it, which the connector builds from the
+  wagmi config's transports. A confirmed batch whose receipt the reader
+  cannot find yet is reported as 100. `wallet_getCapabilities` reports
+  `atomic: supported` exactly for the chains in `batchChainIds`.
 - `embeddedWallet` is the wagmi connector.
 - `exportPrivateKey(client, { address })` exports the private key (see
   [Export](#export)). It is a separate host call, never reachable through the
@@ -302,6 +316,26 @@ These came out of the first security review and are part of the contract.
     `recipientPublicKey` must decode to exactly a P-256 SPKI. The ciphertext
     passes through the host unread and is never logged; only its shape is
     checked. Each export is logged at `warn` with the wallet id.
+13. **A batch is all or nothing, and every call is a transaction.**
+    `sendCalls` takes 1 to `MAX_BATCH_CALLS` (10) calls from the session's
+    wallet on one chain, each validated like a single send, with at most
+    64 KiB of `data` in total. It is accepted only on chains with
+    `sponsor: true`, because only the sponsored path (an EIP-7702 delegated
+    account) can execute calls atomically; elsewhere it is refused with
+    `BATCH_NOT_SUPPORTED`, and the provider refuses with EIP-5792 code 5710
+    (5760 when `atomicRequired`) instead of sending the calls one by one.
+    Every call must pass rule 3: the chain's `allow` list is checked for all
+    calls, then `authorizeTransaction` runs once per call, in order, with the
+    batch's `requestId` and `batch: { index, size }`. The first refusal
+    refuses the batch with `POLICY_DENIED` before Privy is called; a partial
+    batch is never sent. Rules 2, 4 and 5 apply unchanged. Rule 1 applies with
+    the single send's idempotency key, so one `requestId` produces at most
+    one send of either kind; Privy's `wallet_sendCalls` takes no
+    `reference_id`, so a batch is deduplicated only within Privy's
+    idempotency window. Privy evaluates wallet policies against the method
+    `wallet_sendCalls`, for which `buildWalletPolicy` emits no rule, so a
+    wallet carrying such a policy should have its batches refused by Privy:
+    batching can be blocked by a policy, never used to bypass one.
 
 Known limits, documented for integrators rather than solved here: signing
 needs no per-action confirmation, so any script running on the site can sign
@@ -309,8 +343,10 @@ and send within the server's rules (rules 3 and 11 and the Privy policy are
 the real limits); without an `authorizeMessage` hook, any message is signed
 for a signed-in user; the policy builder constrains chain, recipient and value, not
 calldata; Privy keeps an exchanged signing key until it expires, so
-revoking a session early depends on the host's `authenticate`; and once a key
-is exported, nothing here can limit or revoke it.
+revoking a session early depends on the host's `authenticate`; how Privy
+applies `ethereum_transaction` policy conditions to the calls of a
+`wallet_sendCalls` request is not documented by the SDK and is not tested
+here; and once a key is exported, nothing here can limit or revoke it.
 
 ## Security invariants
 
@@ -326,4 +362,5 @@ is exported, nothing here can limit or revoke it.
 - Unit tests mock Privy and `fetch`. They run with no credentials.
 - Integration tests under `test/integration` run only when `PRIVY_APP_ID`,
   `PRIVY_APP_SECRET` and `TEST_USER_JWT` are set, against a Privy development
-  app. See `docs/local-development.md`.
+  app. The policy test also needs `PRIVY_POLICY_TEST=1` and the sponsored
+  batch test `PRIVY_BATCH_TEST=1`. See `docs/local-development.md`.

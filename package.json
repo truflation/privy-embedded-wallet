@@ -1,6 +1,6 @@
 {
   "name": "@truflation/privy-embedded-wallet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Privy embedded wallets with bring-your-own auth and server-side signing for Vue, Nuxt, and other non-React sites.",
   "license": "MIT",
   "repository": {

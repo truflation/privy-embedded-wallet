@@ -19,6 +19,12 @@ export const ROUTES = {
    */
   TRANSACTIONS: '/transactions',
   /**
+   * POST submits a batch of calls as one atomic, sponsored transaction
+   * (EIP-5792 `wallet_sendCalls`). Its status is read like any other
+   * transaction, with GET `${TRANSACTIONS}/:id`.
+   */
+  CALLS: '/calls',
+  /**
    * POST. Returns the wallet's private key, HPKE-encrypted to a public key
    * the browser generated. The host server cannot decrypt it.
    */
@@ -36,6 +42,11 @@ export const ERROR_CODE = {
   INVALID_REQUEST: 'INVALID_REQUEST',
   /** The chain is not configured on the server. */
   CHAIN_NOT_SUPPORTED: 'CHAIN_NOT_SUPPORTED',
+  /**
+   * The chain is configured, but batched calls are not accepted on it. Only
+   * chains with `sponsor: true` take batches.
+   */
+  BATCH_NOT_SUPPORTED: 'BATCH_NOT_SUPPORTED',
   /** A wallet policy or the host's transaction rules rejected the request. */
   POLICY_DENIED: 'POLICY_DENIED',
   /**
@@ -64,6 +75,11 @@ export interface WalletResponse {
   address: Address;
   /** True only on the POST that created the wallet. */
   created?: boolean;
+  /**
+   * Chains on which the server accepts `POST ${ROUTES.CALLS}`, ascending.
+   * Absent from servers older than 0.2.0, which accept no batches.
+   */
+  batchChainIds?: number[];
 }
 
 export type SignableMessage = string | { raw: Hex };
@@ -114,6 +130,32 @@ export interface TransactionRequest {
   value?: Hex;
 }
 
+/** Most calls one batch may carry. */
+export const MAX_BATCH_CALLS = 10;
+
+/** One call inside a batch: the fields of a transaction that vary per call. */
+export interface BatchCall {
+  to: Address;
+  data?: Hex;
+  /** Wei, as a hex quantity. */
+  value?: Hex;
+}
+
+/**
+ * A batch of calls sent atomically from one wallet on one chain. Every call
+ * passes the same server rules as a single transaction; if any is refused,
+ * nothing is sent.
+ */
+export interface SendCallsRequest {
+  /** As on `TransactionRequest`: one UUID per user intent, reused on retry. */
+  requestId: string;
+  /** The address the client believes it is sending from. */
+  from: Address;
+  chainId: number;
+  /** Between 1 and `MAX_BATCH_CALLS` calls, executed in order. */
+  calls: BatchCall[];
+}
+
 export const TRANSACTION_STATUS = {
   PENDING: 'pending',
   CONFIRMED: 'confirmed',
@@ -131,4 +173,9 @@ export interface TransactionResponse {
    * is still being bundled, so clients poll until it appears.
    */
   hash?: Hex;
+  /**
+   * The chain the transaction was sent on, when Privy reports it. Set by
+   * `GET ${ROUTES.TRANSACTIONS}/:id` from 0.2.0; absent on submit responses.
+   */
+  chainId?: number;
 }
