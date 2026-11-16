@@ -221,12 +221,18 @@ step is required for that.
 
 ### Install
 
+The package is not on the npm registry. Each version is a tarball attached to
+a [GitHub Release](https://github.com/truflation/privy-embedded-wallet/releases).
+Install it by URL, which pins the exact version:
+
 ```sh
-npm install @truflation/privy-embedded-wallet
+npm install https://github.com/truflation/privy-embedded-wallet/releases/download/v0.1.0/truflation-privy-embedded-wallet-0.1.0.tgz
 ```
 
-Check the registry for the current version. The package is pre-1.0 and its
-API can change between minor versions, so pin the version you tested.
+`yarn add` and `pnpm add` accept the same URL. Your lockfile records the
+tarball's checksum, and each release also carries a `.sha256` file. The
+package is pre-1.0 and its API can change between minor versions, so read the
+release notes before moving to a newer tarball.
 
 `/server` depends on `@privy-io/node` (pinned by this package) and `viem`.
 You also need a JWT library for your `authenticate` function (the examples use
