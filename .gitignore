@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+
+# Secrets and key material
+.env
+.env.*
+!.env.example
+*.pem
+signing_keys*.json
+
+# Local-only notes and scratch files
+.local/
+
+# Example apps
+examples/**/node_modules/
+examples/**/dist/
