@@ -1,0 +1,88 @@
+{
+  "name": "@truflation/privy-embedded-wallet",
+  "version": "0.0.0",
+  "description": "Privy embedded wallets with bring-your-own auth and server-side signing for Vue, Nuxt, and other non-React sites.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/truflation/privy-embedded-wallet.git"
+  },
+  "homepage": "https://github.com/truflation/privy-embedded-wallet#readme",
+  "bugs": {
+    "url": "https://github.com/truflation/privy-embedded-wallet/issues"
+  },
+  "keywords": [
+    "privy",
+    "embedded-wallet",
+    "wagmi",
+    "ethereum",
+    "vue",
+    "nuxt"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./wagmi": {
+      "types": "./dist/wagmi.d.ts",
+      "import": "./dist/wagmi.js"
+    },
+    "./vue": {
+      "types": "./dist/vue.d.ts",
+      "import": "./dist/vue.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup && node scripts/check-dist.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@hpke/chacha20poly1305": "^1.8.1",
+    "@hpke/core": "^1.10.1",
+    "@privy-io/node": "0.39.0",
+    "viem": "^2.45.1"
+  },
+  "peerDependencies": {
+    "@wagmi/core": ">=3.3.0 <4",
+    "vue": ">=3.4"
+  },
+  "peerDependenciesMeta": {
+    "@wagmi/core": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@wagmi/core": "3.3.2",
+    "eslint": "^10.15.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.10.1",
+    "tsup": "^9.0.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.2",
+    "vitest": "^5.1.0",
+    "vue": "^3.5.45"
+  }
+}
