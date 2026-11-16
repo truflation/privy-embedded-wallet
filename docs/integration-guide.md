@@ -5,6 +5,14 @@ a Privy embedded wallet that works as an ordinary wagmi connector. It is
 written for an engineer who has not seen this package before, and it is exact
 enough to hand to a coding agent.
 
+Why a separate package: Privy's main web SDK is a React library, so a site on
+Vue, Nuxt, Svelte or server-rendered pages cannot use it directly. Privy's
+custom authentication and server wallets need no React, and this package is
+the wiring between them and a site that already has its own accounts. It was
+built for a Nuxt site with Supabase Auth and Reown AppKit, and it should fit
+any site with the same shape. The [README](../README.md#why-this-exists) has
+the longer version.
+
 Related documents:
 
 - [API reference](api.md): every export, with signatures and errors.

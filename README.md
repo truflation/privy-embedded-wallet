@@ -13,6 +13,35 @@ the server side, bring your own database, and need your own Privy app.
 
 Start with the [integration guide](docs/integration-guide.md).
 
+## Why this exists
+
+Privy's main web SDK, with its login and wallet screens, is a React library.
+A site built on Vue, Nuxt, Svelte, or plain server-rendered pages cannot drop
+it in, and a site that already has its own login does not want a second login
+system beside the first.
+
+Privy also offers a server-side route that needs no React: custom
+authentication, where Privy verifies the JWTs your own auth already issues,
+and server wallets, where your server asks Privy to sign for a user and proves
+the user's consent with that same JWT. The pieces exist, but wiring them into
+a safe, usable wallet is real work: provisioning and recovery, idempotent
+sends, account checks, limits on what may be signed, a browser provider, a
+wagmi connector that cooperates with wallet modals, and key export that keeps
+the key away from your server.
+
+This package is that wiring. It was built for
+[Truflation](https://truflation.com), a Nuxt site with Supabase Auth and Reown
+AppKit, and is kept in its own repository so it can be updated on its own
+schedule and used by other sites with a similar shape:
+
+- your front end is not React, or you do not want Privy's UI;
+- you already have accounts and sessions, and can issue asymmetric JWTs;
+- you want users to get a wallet without installing anything, alongside any
+  external wallets you already support through wagmi.
+
+If your site is React and you are happy with Privy's own login, use Privy's
+React SDK instead. It does more with less code.
+
 ## Entry points
 
 - `@truflation/privy-embedded-wallet/server`: Node. Wallet service, request
