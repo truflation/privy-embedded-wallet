@@ -230,7 +230,7 @@ a [GitHub Release](https://github.com/truflation/privy-embedded-wallet/releases)
 Install it by URL, which pins the exact version:
 
 ```sh
-npm install https://github.com/truflation/privy-embedded-wallet/releases/download/v0.2.0/truflation-privy-embedded-wallet-0.2.0.tgz
+npm install https://github.com/truflation/privy-embedded-wallet/releases/download/v0.2.1/truflation-privy-embedded-wallet-0.2.1.tgz
 ```
 
 `yarn add` and `pnpm add` accept the same URL. Your lockfile records the

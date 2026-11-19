@@ -1,3 +1,5 @@
+import { BaseError, createWalletClient, custom } from 'viem';
+import { mainnet } from 'viem/chains';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createEmbeddedProvider,
@@ -342,6 +344,50 @@ describe('wallet_switchEthereumChain and unsupported methods', () => {
     await expect(
       setup().provider.request({ method: 'eth_signTypedData_v4', params: [] }),
     ).rejects.toEqual(rpcError(4200));
+  });
+
+  it('answers wallet_sendTransaction with -32601, as viem expects', async () => {
+    await expect(
+      setup().provider.request({
+        method: 'wallet_sendTransaction',
+        params: [],
+      }),
+    ).rejects.toEqual(rpcError(-32601));
+  });
+
+  it('keeps the real reason when viem retries a failed send', async () => {
+    const sendTransaction = vi.fn(async () => {
+      throw new EmbeddedWalletClientError(
+        ERROR_CODE.INSUFFICIENT_FUNDS,
+        'insufficient funds for gas * price + value',
+        402,
+      );
+    });
+    const { provider } = setup(createFakeClient({ sendTransaction }));
+    const request = vi.spyOn(provider, 'request');
+    const wallet = createWalletClient({
+      account: WALLET_ADDRESS,
+      chain: mainnet,
+      transport: custom(provider),
+    });
+    const error = await wallet
+      .sendTransaction({ to: WALLET_ADDRESS, value: 1n })
+      .catch((e: unknown) => e);
+    // viem did retry as wallet_sendTransaction, and still threw the send's
+    // own error: before, the retry's 4200 replaced it.
+    expect(request.mock.calls.map(([args]) => args.method)).toContain(
+      'wallet_sendTransaction',
+    );
+    expect(error).toBeInstanceOf(BaseError);
+    expect(
+      (error as BaseError).walk(
+        (e) => (e as { code?: unknown }).code === -32000,
+      ),
+    ).toBeTruthy();
+    expect(
+      (error as BaseError).walk((e) => (e as { code?: unknown }).code === 4200),
+    ).toBeNull();
+    expect(sendTransaction).toHaveBeenCalledTimes(1);
   });
 });
 

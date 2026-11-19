@@ -465,6 +465,16 @@ export function createEmbeddedProvider(
         return getCapabilities(params);
       case 'wallet_switchEthereumChain':
         return switchChain(params);
+      // viem retries a failed eth_sendTransaction (-32000, -32602) as
+      // wallet_sendTransaction, and rethrows the original error only when
+      // the retry answers -32601 or -32004. Any other answer, such as 4200,
+      // replaces the real reason (insufficient funds, a refusal) with
+      // "unsupported method".
+      case 'wallet_sendTransaction':
+        throw new EmbeddedProviderError(
+          RPC_ERROR_CODE.METHOD_NOT_FOUND,
+          'The method wallet_sendTransaction is not supported by this wallet; use eth_sendTransaction.',
+        );
       default:
         throw new EmbeddedProviderError(
           RPC_ERROR_CODE.UNSUPPORTED_METHOD,
